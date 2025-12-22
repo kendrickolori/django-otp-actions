@@ -1,4 +1,5 @@
 import time
+import secrets
 import random
 from datetime import datetime, timedelta
 from django.conf import settings
@@ -41,7 +42,7 @@ def decrypt_context(encrypted_context):
     return context_dict
 
 
-def generate_otp(identifier=None, metadata=None, max_retries=3):
+def generate_otp(identifier=None ,metadata=None, max_retries=3,length=6):
     """
     Generate OTP and encrypted context.
 
@@ -54,9 +55,10 @@ def generate_otp(identifier=None, metadata=None, max_retries=3):
         max_retries: Maximum number of retry attempts allowed (default: 3)
 
     Returns:
-        tuple: (otp_code, encrypted_context)
+        tuple: (otp, encrypted_context)
     """
-    otp = random.randint(100000, 999999)
+    otp = ''.join(str(secrets.randbelow(10)) for _ in range(length))
+    print(otp)
     now = datetime.now()
 
     context = {
