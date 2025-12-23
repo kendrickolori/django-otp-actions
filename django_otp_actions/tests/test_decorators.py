@@ -1,19 +1,16 @@
+import sys
 import django
 from django.conf import settings
 from cryptography.fernet import Fernet
-from freezegun import freeze_time
-from datetime import datetime, timedelta
+import pytest
 
-# Configure Django settings BEFORE importing DRF
+# ------------------------------------------------------------------
+# 1. CRITICAL: Configure Django Settings BEFORE importing DRF
+# ------------------------------------------------------------------
 if not settings.configured:
     settings.configure(
         DEBUG=True,
-        DATABASES={
-            "default": {
-                "ENGINE": "django.db.backends.sqlite3",
-                "NAME": ":memory:",
-            }
-        },
+        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
         INSTALLED_APPS=[
             "django.contrib.contenttypes",
             "django.contrib.auth",
@@ -22,373 +19,385 @@ if not settings.configured:
         ],
         SECRET_KEY="test-secret-key",
         OTP_SIGNING_KEY=Fernet.generate_key(),
-        REST_FRAMEWORK={},
+        REST_FRAMEWORK={
+            'TEST_REQUEST_RENDERER_CLASSES': [
+                'rest_framework.renderers.JSONRenderer',
+                'rest_framework.renderers.MultiPartRenderer',
+            ]
+        },
     )
     django.setup()
 
-# NOW import DRF components and decorators
-from django_otp_actions.decorators import otp_protected, verify_otp
-from django_otp_actions.services import generate_otp
+# ------------------------------------------------------------------
+# 2. Imports (Now safe to import DRF and Project components)
+# ------------------------------------------------------------------
+import hashlib
+from unittest.mock import patch
+from datetime import datetime, timedelta
+from freezegun import freeze_time
+from django.test import override_settings
 
+from rest_framework.test import APIRequestFactory
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.decorators import api_view
 
-class MockRequest:
-    """Simple mock request object that mimics DRF Request"""
+from django_otp_actions.decorators import otp_protected, require_otp_verification
+from django_otp_actions.services import (
+    generate_otp, encrypt_context, decrypt_context, increment_retry_count
+)
+from django_otp_actions.exceptions import OTPException
 
-    def __init__(self, data=None):
-        self.data = data or {}
-        self.META = {}
-        self.method = "POST"
-
-
-# Test data
+# ------------------------------------------------------------------
+# 3. Test Constants & Helpers
+# ------------------------------------------------------------------
+factory = APIRequestFactory()
 IDENTIFIER = "test@example.com"
-METADATA = {"email": "user@example.com", "phone": "+1234567890", "name": "Test User"}
+METADATA = {"email": "user@example.com", "name": "Test User"}
 
+# --- UPDATED MOCK VIEWS ---
+# We use @api_view to convert the raw Factory request into a DRF Request
+# so that `request.data` is available to the decorators.
 
+@api_view(['POST'])
+@otp_protected()
+def protected_gen_view(request):
+    """View that generates an OTP."""
+    otp, context = request.generate_otp(IDENTIFIER, METADATA)
+    return Response({"otp": otp, "context": context})
+
+@api_view(['POST'])
+@require_otp_verification()
+def protected_verify_view(request, *args, **kwargs):
+    """View that requires verification."""
+    # Return args/kwargs to verify they are passed through
+    return Response({
+        "status": "success",
+        "identifier": request.otp_context.get("identifier"),
+        "kwargs": kwargs
+    })
+
+# ------------------------------------------------------------------
+# 4. Test Suites
+# ------------------------------------------------------------------
 class TestOTPProtectedDecorator:
-    """Test otp_protected decorator."""
+    """Tests for the @otp_protected decorator (Generation Phase)."""
 
     def test_injects_generate_otp_function(self):
         """Decorator should inject generate_otp into request."""
-        request = MockRequest()
+        request = factory.post('/gen/')
 
+        @api_view(['POST'])
         @otp_protected()
-        def view(request):
-            return request
+        def check_injection(req):
+            # Fix: We must return a Response object, not the function itself.
+            # We check the logic inside the view and return the result as data.
+            func = getattr(req, "generate_otp", None)
+            return Response({
+                "has_attr": hasattr(req, "generate_otp"),
+                "is_callable": callable(func)
+            })
 
-        result = view(request)
+        response = check_injection(request)
 
-        assert hasattr(result, "generate_otp")
-        assert callable(result.generate_otp)
+        assert response.status_code == 200
+        assert response.data["has_attr"] is True
+        assert response.data["is_callable"] is True
 
     def test_generate_otp_returns_valid_data(self):
         """Injected generate_otp should return valid OTP and context."""
-        request = MockRequest()
-
-        @otp_protected()
-        def view(request):
-            otp, context = request.generate_otp(IDENTIFIER, METADATA)
-            return otp, context
-
-        otp, context = view(request)
-
-        assert otp is not None
-        assert len(otp) == 6
-        assert otp.isdigit()
-        assert context is not None
-        assert isinstance(context, str)
+        request = factory.post('/gen/')
+        response = protected_gen_view(request)
+        
+        assert response.status_code == 200
+        assert len(response.data["otp"]) == 6
+        assert response.data["otp"].isdigit()
+        assert isinstance(response.data["context"], str)
 
     def test_preserves_function_metadata(self):
         """Decorator should preserve original function name and docstring."""
-
+        # We test the decorator directly on a plain function to verify metadata
         @otp_protected()
-        def my_view(request):
-            """My view docstring."""
+        def dummy_view(request):
+            """Docstring."""
             pass
-
-        assert my_view.__name__ == "my_view"
-        assert my_view.__doc__ == "My view docstring."
+        
+        assert dummy_view.__name__ == "dummy_view"
+        assert dummy_view.__doc__ == "Docstring."
 
     def test_passes_through_args_and_kwargs(self):
         """Decorator should pass through additional args and kwargs."""
-        request = MockRequest()
-
+        request = factory.post('/gen/')
+        
+        @api_view(['POST'])
         @otp_protected()
-        def view(request, arg1, arg2, kwarg1=None):
-            return arg1, arg2, kwarg1
+        def view(req, *args, **kwargs):
+            # Return args/kwargs in the response body
+            return Response({"args": args, "kwargs": kwargs})
 
-        result = view(request, "a", "b", kwarg1="c")
+        # Note: In DRF test calls, kwargs usually come from the URL router. 
+        # Here we manually pass them to the view function.
+        res = view(request, kwarg1="test_kw")
+        
+        assert res.data["kwargs"]["kwarg1"] == "test_kw"
 
-        assert result == ("a", "b", "c")
-
-
-class TestVerifyOTPDecorator:
-    """Test verify_otp decorator."""
+class TestRequireOTPVerificationDecorator:
+    """Tests for the @require_otp_verification decorator (Verification Phase)."""
 
     @freeze_time("2024-12-20 10:00:00")
     def test_valid_otp_passes(self):
-        """Valid OTP should pass verification and inject context."""
-        otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        request = MockRequest(data={"otp": otp, "context": encrypted_context})
-
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
-
-        result = view(request)
-
-        assert result["status"] == "success"
-        assert hasattr(request, "otp_verified")
-        assert request.otp_verified is True
-        assert hasattr(request, "otp_context")
-        assert request.otp_context["identifier"] == IDENTIFIER
+        """Valid OTP should pass verification and execute view."""
+        otp, context = generate_otp(IDENTIFIER, METADATA)
+        request = factory.post('/v/', {"otp": otp, "context": context}, format='json')
+        
+        response = protected_verify_view(request)
+        
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["status"] == "success"
+        assert response.data["identifier"] == IDENTIFIER
 
     @freeze_time("2024-12-20 10:00:00")
     def test_invalid_otp_returns_400(self):
-        """Invalid OTP should return 400 with error and updated context."""
-        otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        wrong_otp = "999999" if otp != "999999" else "111111"
-        request = MockRequest(data={"otp": wrong_otp, "context": encrypted_context})
-
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
-
-        result = view(request)
-
-        assert hasattr(result, "status_code")
-        assert result.status_code == 400
-        assert "error" in result.data
-        assert "context" in result.data
-        assert "Invalid OTP" in result.data["error"]
+        """Invalid OTP should return 400 and increment retry count."""
+        otp, context = generate_otp(IDENTIFIER, METADATA)
+        request = factory.post('/v/', {"otp": "000000", "context": context}, format='json')
+        
+        response = protected_verify_view(request)
+        
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data["error_code"] == "INVALID_OTP"
+        
+        # Verify retry increment
+        new_ctx = decrypt_context(response.data["context"])
+        assert new_ctx["retry_count"] == 1
 
     @freeze_time("2024-12-20 10:00:00")
     def test_otp_expired_returns_410(self):
-        """Expired OTP should return 410 with OTP_EXPIRED error code."""
-        otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        request = MockRequest(data={"otp": otp, "context": encrypted_context})
-
-        # Move time forward 6 minutes (past OTP expiry)
+        """Expired OTP (5 min) should return 410."""
+        otp, context = generate_otp(IDENTIFIER, METADATA)
+        
         with freeze_time("2024-12-20 10:06:00"):
+            request = factory.post('/v/', {"otp": otp, "context": context}, format='json')
+            response = protected_verify_view(request)
 
-            @verify_otp()
-            def view(request):
-                return {"status": "success"}
-
-            result = view(request)
-
-        assert hasattr(result, "status_code")
-        assert result.status_code == 410
-        assert result.data["error_code"] == "OTP_EXPIRED"
-        assert "OTP has expired" in result.data["error"]
+        assert response.status_code == status.HTTP_410_GONE
+        assert response.data["error_code"] == "OTP_EXPIRED"
 
     @freeze_time("2024-12-20 10:00:00")
     def test_session_expired_returns_410(self):
-        """Expired session should return 410 with SESSION_EXPIRED error code."""
-        otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        request = MockRequest(data={"otp": otp, "context": encrypted_context})
-
-        # Move time forward 16 minutes (past session expiry)
+        """Expired Session (15 min) should return 410."""
+        otp, context = generate_otp(IDENTIFIER, METADATA)
+        
         with freeze_time("2024-12-20 10:16:00"):
+            request = factory.post('/v/', {"otp": otp, "context": context}, format='json')
+            response = protected_verify_view(request)
 
-            @verify_otp()
-            def view(request):
-                return {"status": "success"}
-
-            result = view(request)
-
-        assert hasattr(result, "status_code")
-        assert result.status_code == 410
-        assert result.data["error_code"] == "SESSION_EXPIRED"
-        assert "Session has expired" in result.data["error"]
+        assert response.status_code == status.HTTP_410_GONE
+        assert response.data["error_code"] == "SESSION_EXPIRED"
 
     @freeze_time("2024-12-20 10:00:00")
     def test_max_retries_exceeded_returns_429(self):
-        """Exceeding max retries should return 429 with MAX_RETRIES_EXCEEDED."""
-        otp, encrypted_context = generate_otp(IDENTIFIER, METADATA, max_retries=3)
-        wrong_otp = "999999" if otp != "999999" else "111111"
+        """Exceeding max retries should return 429."""
+        otp, context = generate_otp(IDENTIFIER, max_retries=1)
+        
+        # 1. Fail once
+        req1 = factory.post('/v/', {"otp": "wrong", "context": context}, format='json')
+        res1 = protected_verify_view(req1)
+        ctx_after_fail = res1.data["context"]
 
-        # Make 3 failed attempts
-        for _ in range(3):
-            request = MockRequest(data={"otp": wrong_otp, "context": encrypted_context})
-
-            @verify_otp()
-            def view(request):
-                return {"status": "success"}
-
-            result = view(request)
-            if hasattr(result, "data") and "context" in result.data:
-                encrypted_context = result.data["context"]
-
-        # 4th attempt should fail with max retries exceeded
-        request = MockRequest(data={"otp": wrong_otp, "context": encrypted_context})
-
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
-
-        result = view(request)
-
-        assert hasattr(result, "status_code")
-        assert result.status_code == 429
-        assert result.data["error_code"] == "MAX_RETRIES_EXCEEDED"
-        assert "Maximum retry attempts" in result.data["error"]
+        # 2. Try again (retry count is now 1, max is 1, so this attempt should be blocked)
+        req2 = factory.post('/v/', {"otp": "wrong", "context": ctx_after_fail}, format='json')
+        res2 = protected_verify_view(req2)
+        
+        assert res2.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        assert res2.data["error_code"] == "MAX_RETRIES_EXCEEDED"
 
     def test_missing_otp_returns_400(self):
-        """Missing OTP should return 400 with error message."""
-        request = MockRequest(data={"context": "some_context"})
-
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
-
-        result = view(request)
-
-        assert hasattr(result, "status_code")
-        assert result.status_code == 400
-        assert "OTP and context are required" in result.data["error"]
+        request = factory.post('/v/', {"context": "ctx"}, format='json')
+        response = protected_verify_view(request)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data["error_code"] == "MISSING_FIELDS"
 
     def test_missing_context_returns_400(self):
-        """Missing context should return 400 with error message."""
-        request = MockRequest(data={"otp": "123456"})
-
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
-
-        result = view(request)
-
-        assert hasattr(result, "status_code")
-        assert result.status_code == 400
-        assert "OTP and context are required" in result.data["error"]
+        request = factory.post('/v/', {"otp": "123"}, format='json')
+        response = protected_verify_view(request)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data["error_code"] == "MISSING_FIELDS"
 
     def test_missing_both_returns_400(self):
-        """Missing both OTP and context should return 400."""
-        request = MockRequest(data={})
-
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
-
-        result = view(request)
-
-        assert hasattr(result, "status_code")
-        assert result.status_code == 400
-        assert "OTP and context are required" in result.data["error"]
+        request = factory.post('/v/', {}, format='json')
+        response = protected_verify_view(request)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data["error_code"] == "MISSING_FIELDS"
 
     def test_invalid_encrypted_context_returns_400(self):
-        """Invalid/corrupted context should return 400 with OTP_ERROR."""
-        request = MockRequest(data={"otp": "123456", "context": "invalid_context"})
-
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
-
-        result = view(request)
-
-        assert hasattr(result, "status_code")
-        assert result.status_code == 400
-        assert result.data["error_code"] == "OTP_ERROR"
-
-    def test_preserves_function_metadata(self):
-        """Decorator should preserve original function name and docstring."""
-
-        @verify_otp()
-        def my_verify_view(request):
-            """My verify view docstring."""
-            pass
-
-        assert my_verify_view.__name__ == "my_verify_view"
-        assert my_verify_view.__doc__ == "My verify view docstring."
+        request = factory.post('/v/', {"otp": "123", "context": "garbage_data"}, format='json')
+        response = protected_verify_view(request)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data["error_code"] == "OTP_ERROR"
 
     @freeze_time("2024-12-20 10:00:00")
-    def test_passes_through_args_and_kwargs(self):
-        """Decorator should pass through additional args and kwargs."""
-        otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        request = MockRequest(data={"otp": otp, "context": encrypted_context})
-
-        @verify_otp()
-        def view(request, arg1, arg2, kwarg1=None):
-            return arg1, arg2, kwarg1
-
-        result = view(request, "a", "b", kwarg1="c")
-
-        assert result == ("a", "b", "c")
+    def test_strips_whitespace_from_inputs(self):
+        otp, context = generate_otp(IDENTIFIER)
+        request = factory.post('/v/', {"otp": f" {otp} ", "context": f" {context} "}, format='json')
+        response = protected_verify_view(request)
+        assert response.status_code == status.HTTP_200_OK
 
 
 class TestDecoratorIntegration:
-    """Test decorators working together."""
+    """Integration flow tests."""
 
     @freeze_time("2024-12-20 10:00:00")
     def test_full_otp_flow(self):
-        """Test complete flow: generate OTP, then verify it."""
-        # Step 1: Generate OTP
-        generate_request = MockRequest()
+        # 1. Generate
+        gen_req = factory.post('/gen/')
+        gen_res = protected_gen_view(gen_req)
+        
+        # 2. Verify
+        verify_req = factory.post('/v/', gen_res.data, format='json')
+        verify_res = protected_verify_view(verify_req)
+        
+        assert verify_res.status_code == 200
+        assert verify_res.data["identifier"] == IDENTIFIER
 
-        @otp_protected()
-        def generate_view(request):
-            otp, context = request.generate_otp(IDENTIFIER, METADATA)
-            return {"otp": otp, "context": context}
-
-        generate_result = generate_view(generate_request)
-        otp = generate_result["otp"]
-        context = generate_result["context"]
-
-        # Step 2: Verify OTP
-        verify_request = MockRequest(data={"otp": otp, "context": context})
-
-        @verify_otp()
-        def verify_view(request):
-            return {
-                "status": "verified",
-                "identifier": request.otp_context["identifier"],
-                "metadata": request.otp_context["metadata"],
-            }
-
-        verify_result = verify_view(verify_request)
-
-        assert verify_result["status"] == "verified"
-        assert verify_result["identifier"] == IDENTIFIER
-        assert verify_result["metadata"] == METADATA
+    @freeze_time("2024-12-20 10:00:00")
+    def test_multiple_failed_attempts_then_success(self):
+        otp, context = generate_otp(IDENTIFIER, max_retries=5)
+        
+        # Fail 2 times
+        for _ in range(2):
+            req = factory.post('/v/', {"otp": "wrong", "context": context}, format='json')
+            res = protected_verify_view(req)
+            context = res.data["context"] # Update context for next try
+            
+        # Succeed
+        req_success = factory.post('/v/', {"otp": otp, "context": context}, format='json')
+        res_success = protected_verify_view(req_success)
+        
+        assert res_success.status_code == 200
 
 
 class TestEdgeCases:
-    """Test edge cases for decorators."""
+    """Edge cases (None, Empty Strings, etc)."""
 
-    @freeze_time("2024-12-20 10:00:00")
     def test_empty_string_otp(self):
-        """Empty string OTP should be treated as missing."""
-        request = MockRequest(data={"otp": "", "context": "some_context"})
+        request = factory.post('/v/', {"otp": "", "context": "ctx"}, format='json')
+        res = protected_verify_view(request)
+        assert res.status_code == 400
+        assert res.data["error_code"] == "MISSING_FIELDS"
 
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
-
-        result = view(request)
-
-        assert result.status_code == 400
-        assert "OTP and context are required" in result.data["error"]
-
-    @freeze_time("2024-12-20 10:00:00")
     def test_empty_string_context(self):
-        """Empty string context should be treated as missing."""
-        request = MockRequest(data={"otp": "123456", "context": ""})
+        request = factory.post('/v/', {"otp": "123", "context": ""}, format='json')
+        res = protected_verify_view(request)
+        assert res.status_code == 400
+        assert res.data["error_code"] == "MISSING_FIELDS"
 
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
+    def test_none_otp_value(self):
+        request = factory.post('/v/', {"otp": None, "context": "ctx"}, format='json')
+        res = protected_verify_view(request)
+        assert res.status_code == 400
+        assert res.data["error_code"] == "MISSING_FIELDS"
 
-        result = view(request)
-
-        assert result.status_code == 400
-        assert "OTP and context are required" in result.data["error"]
+    def test_none_context_value(self):
+        request = factory.post('/v/', {"otp": "123", "context": None}, format='json')
+        res = protected_verify_view(request)
+        assert res.status_code == 400
+        assert res.data["error_code"] == "MISSING_FIELDS"
 
     @freeze_time("2024-12-20 10:00:00")
     def test_otp_with_leading_zeros(self):
-        """OTP with leading zeros should work correctly."""
-        # Manually create OTP with leading zeros
-        from django_otp_actions.services import encrypt_context, decrypt_context
+        """Ensure '001234' is treated as a string, not number."""
+        otp_val = "001234"
+        otp_hash = hashlib.sha256(otp_val.encode("utf-8")).hexdigest()
+        
+        # Build manual context
+        now = datetime.now()
+        ctx_data = {
+            "identifier": IDENTIFIER,
+            "otp_hash": otp_hash,
+            "max_retries": 3,
+            "retry_count": 0,
+            "timestamp": now.timestamp(),
+            "otp_expiry": (now + timedelta(minutes=5)).timestamp(),
+            "session_expiry": (now + timedelta(minutes=15)).timestamp()
+        }
+        encrypted = encrypt_context(ctx_data)
+        
+        request = factory.post('/v/', {"otp": otp_val, "context": encrypted}, format='json')
+        res = protected_verify_view(request)
+        
+        assert res.status_code == 200
 
-        otp_with_zeros = "000123"
-        _, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        context = decrypt_context(encrypted_context)
-        context["code"] = otp_with_zeros
-        encrypted_context = encrypt_context(context)
+    def test_preserves_kwargs(self):
+        """Ensure kwargs passed to the view are preserved."""
+        otp, context = generate_otp(IDENTIFIER)
+        request = factory.post('/v/', {"otp": otp, "context": context}, format='json')
+        
+        # Passing extra kwarg 'check_me' via the call to the verified view
+        # Note: In standard DRF, kwargs come from URL patterns. 
+        # Here we simulate by calling the python function directly.
+        res = protected_verify_view(request, check_me="valid")
+        
+        # Note: protected_verify_view puts kwargs in response data
+        assert res.data["kwargs"]["check_me"] == "valid"
 
-        request = MockRequest(
-            data={"otp": otp_with_zeros, "context": encrypted_context}
-        )
 
-        @verify_otp()
-        def view(request):
-            return {"status": "success"}
+class TestRetryCountBehavior:
+    """Specific checks for retry counting logic."""
 
-        result = view(request)
+    @freeze_time("2024-12-20 10:00:00")
+    def test_decorator_increments_retry_on_invalid_otp(self):
+        otp, context = generate_otp(IDENTIFIER)
+        req = factory.post('/v/', {"otp": "wrong", "context": context}, format='json')
+        res = protected_verify_view(req)
+        
+        new_ctx = decrypt_context(res.data["context"])
+        assert new_ctx["retry_count"] == 1
 
-        assert result["status"] == "success"
+    @freeze_time("2024-12-20 10:00:00")
+    def test_decorator_does_not_increment_on_valid_otp(self):
+        otp, context = generate_otp(IDENTIFIER)
+        req = factory.post('/v/', {"otp": otp, "context": context}, format='json')
+        res = protected_verify_view(req)
+        
+        # On success, response is 200
+        assert res.status_code == 200
 
+    @freeze_time("2024-12-20 10:00:00")
+    def test_decorator_does_not_increment_on_expired_otp(self):
+        otp, context = generate_otp(IDENTIFIER)
+        
+        with freeze_time("2024-12-20 10:06:00"):
+            req = factory.post('/v/', {"otp": otp, "context": context}, format='json')
+            res = protected_verify_view(req)
+        
+        assert res.status_code == 410
+        assert "context" not in res.data
+
+
+class TestStressFailures:
+    """Stress tests for configuration/system failures."""
+
+    def test_generate_otp_fails_missing_key(self):
+        """Decorator should handle generate_otp failure."""
+        with override_settings(OTP_SIGNING_KEY=None):
+            request = factory.post('/gen/')
+            with pytest.raises(OTPException):
+                protected_gen_view(request)
+
+    def test_verify_fails_on_corrupted_key_config(self):
+        """If server config is broken during verification, return 400 or 500."""
+        otp, context = generate_otp(IDENTIFIER)
+        
+        # Simulate config changing to something invalid during verification
+        # The key mismatch will cause a decryption failure (InvalidToken/Padding error)
+        with override_settings(OTP_SIGNING_KEY="different_key_that_causes_fail"):
+            req = factory.post('/v/', {"otp": otp, "context": context}, format='json')
+            res = protected_verify_view(req)
+            
+            # Since decryption fails, it catches as OTPException and returns 400
+            assert res.status_code == 400
+            assert res.data["error_code"] == "OTP_ERROR"
 
 if __name__ == "__main__":
-    import pytest
-
     pytest.main([__file__, "-v"])

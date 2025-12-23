@@ -28,6 +28,4 @@ class InvalidOTPException(OTPException):
     Contains updated context with incremented retry count.
     """
 
-    def __init__(self, message, updated_context=None):
-        super().__init__(message)
-        self.updated_context = updated_context
+    
