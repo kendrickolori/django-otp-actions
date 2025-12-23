@@ -22,8 +22,12 @@ class MaxRetriesExceededException(OTPException):
     pass
 
 
+
 class InvalidOTPException(OTPException):
     """
     Raised when OTP code is invalid.
-    Contains updated context with incremented retry count.
+    Stores the updated context (with incremented retry count) to return to the client.
     """
+    def __init__(self, message, new_context=None):
+        super().__init__(message)
+        self.new_context = new_context
