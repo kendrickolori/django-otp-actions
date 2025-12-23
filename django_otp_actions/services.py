@@ -139,9 +139,9 @@ def generate_otp(identifier=None, metadata=None, max_retries=3, length=6):
     try:
         # Generate cryptographically secure OTP
         otp = "".join(str(secrets.randbelow(10)) for _ in range(length))
-        
+
         now = datetime.now()
-        
+
         # Hash OTP before storing
         otp_hash = hashlib.sha256(otp.encode("utf-8")).hexdigest()
 
@@ -158,7 +158,7 @@ def generate_otp(identifier=None, metadata=None, max_retries=3, length=6):
 
         encrypted_context = encrypt_context(context)
         return (otp, encrypted_context)
-    
+
     except OTPException:
         # Re-raise OTPException from encrypt_context
         raise
@@ -257,9 +257,7 @@ def validate_otp(otp, encrypted_context):
 
         # Check OTP expiry
         if current_time > context.get("otp_expiry", 0):
-            raise OTPExpiredException(
-                "OTP has expired. Please request a new OTP code."
-            )
+            raise OTPExpiredException("OTP has expired. Please request a new OTP code.")
 
         # Check retry count
         if context["retry_count"] >= context.get("max_retries", 3):
@@ -271,7 +269,7 @@ def validate_otp(otp, encrypted_context):
         # Validate OTP using constant-time comparison
         otp_hash = hashlib.sha256(str(otp).encode("utf-8")).hexdigest()
         stored_hash = context.get("otp_hash", "")
-        
+
         if not secrets.compare_digest(stored_hash, otp_hash):
             attempts_remaining = context.get("max_retries", 3) - context["retry_count"]
             raise InvalidOTPException(
@@ -343,7 +341,7 @@ def verify_otp(otp, encrypted_context):
     """
     # Validate OTP (raises exceptions on failure)
     validate_otp(otp, encrypted_context)
-    
+
     # If validation succeeds, decrypt and return context
     try:
         context = decrypt_context(encrypted_context)
@@ -356,10 +354,10 @@ def verify_otp(otp, encrypted_context):
 
 # Export public API
 __all__ = [
-    'generate_otp',
-    'validate_otp',
-    'verify_otp',
-    'increment_retry_count',
-    'encrypt_context',
-    'decrypt_context',
+    "generate_otp",
+    "validate_otp",
+    "verify_otp",
+    "increment_retry_count",
+    "encrypt_context",
+    "decrypt_context",
 ]

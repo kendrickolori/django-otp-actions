@@ -27,5 +27,3 @@ class InvalidOTPException(OTPException):
     Raised when OTP code is invalid.
     Contains updated context with incremented retry count.
     """
-
-    

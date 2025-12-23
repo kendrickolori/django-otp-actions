@@ -21,9 +21,7 @@ from django_otp_actions.exceptions import (
 )
 from django.conf import settings
 
-settings.configure(
-    OTP_SIGNING_KEY=Fernet.generate_key()
-)
+settings.configure(OTP_SIGNING_KEY=Fernet.generate_key())
 
 # Test data
 IDENTIFIER = "test@example.com"
@@ -61,7 +59,7 @@ class TestEncryption:
         """Decrypting invalid token should raise OTPException."""
         with pytest.raises(OTPException) as exc_info:
             decrypt_context("invalid_token_string")
-        
+
         assert "Failed to decrypt context" in str(exc_info.value)
 
 
@@ -105,7 +103,7 @@ class TestOTPGeneration:
         # Should have otp_hash, not code
         assert "otp_hash" in decrypted
         assert "code" not in decrypted
-        
+
         # Hash should be 64 characters (SHA-256 hex)
         assert len(decrypted["otp_hash"]) == 64
 
@@ -162,7 +160,7 @@ class TestOTPValidation:
     def test_increment_retry_count_function(self):
         """Test the increment_retry_count helper function."""
         otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        
+
         # Increment retry count
         updated_context = increment_retry_count(encrypted_context)
         decrypted = decrypt_context(updated_context)
@@ -264,9 +262,9 @@ class TestOTPValidation:
         """Test that secrets.compare_digest is used for comparison."""
         import hashlib
         import secrets as secrets_module
-        
+
         otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        
+
         # This should work (uses constant-time comparison internally)
         result = validate_otp(otp, encrypted_context)
         assert result is True
@@ -302,7 +300,7 @@ class TestEdgeCases:
         # Generate many OTPs to hopefully get one with leading zeros
         for _ in range(100):
             otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-            if otp.startswith('0'):
+            if otp.startswith("0"):
                 # Test that it validates correctly
                 result = validate_otp(otp, encrypted_context)
                 assert result is True
@@ -311,9 +309,10 @@ class TestEdgeCases:
             # If we didn't get a leading zero, at least test the principle
             # by manually creating one
             import hashlib
+
             test_otp = "000123"
             otp_hash = hashlib.sha256(test_otp.encode("utf-8")).hexdigest()
-            
+
             now = datetime.now()
             context = {
                 "identifier": IDENTIFIER,
@@ -326,7 +325,7 @@ class TestEdgeCases:
                 "max_retries": 3,
             }
             encrypted_context = encrypt_context(context)
-            
+
             result = validate_otp(test_otp, encrypted_context)
             assert result is True
 
@@ -410,28 +409,28 @@ class TestIncrementRetryCount:
         """Retry count should start at 0."""
         otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
         context = decrypt_context(encrypted_context)
-        
+
         assert context["retry_count"] == 0
 
     @freeze_time("2024-12-20 10:00:00")
     def test_increment_adds_one(self):
         """Each increment should add exactly 1."""
         otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        
+
         updated = increment_retry_count(encrypted_context)
         context = decrypt_context(updated)
-        
+
         assert context["retry_count"] == 1
 
     @freeze_time("2024-12-20 10:00:00")
     def test_multiple_increments(self):
         """Multiple increments should accumulate."""
         otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
-        
+
         encrypted_context = increment_retry_count(encrypted_context)
         encrypted_context = increment_retry_count(encrypted_context)
         encrypted_context = increment_retry_count(encrypted_context)
-        
+
         context = decrypt_context(encrypted_context)
         assert context["retry_count"] == 3
 
