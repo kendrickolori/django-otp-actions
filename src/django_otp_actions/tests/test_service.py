@@ -19,9 +19,10 @@ from django_otp_actions.exceptions import (
     MaxRetriesExceededException,
     OTPException,
 )
-from django.conf import settings
 
-settings.configure(OTP_SIGNING_KEY=Fernet.generate_key())
+
+if not settings.configured:
+    settings.configure(OTP_SIGNING_KEY=Fernet.generate_key())
 
 # Test data
 IDENTIFIER = "test@example.com"
@@ -244,7 +245,9 @@ class TestOTPValidation:
         otp, encrypted_context = generate_otp(IDENTIFIER, METADATA)
 
         # Pass OTP as integer - should still work due to str() conversion
+        
         result = validate_otp(int(otp), encrypted_context)
+        print(result)
         assert result is True
 
     @freeze_time("2024-12-20 10:00:00")

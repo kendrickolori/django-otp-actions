@@ -246,6 +246,7 @@ def validate_otp(otp, encrypted_context):
         when handling InvalidOTPException.
     """
     try:
+        
         context = decrypt_context(encrypted_context)
         current_time = datetime.now().timestamp()
 
@@ -265,6 +266,9 @@ def validate_otp(otp, encrypted_context):
                 f"Maximum retry attempts ({context.get('max_retries', 3)}) exceeded. "
                 "Please request a new OTP code."
             )
+        otp_str = str(otp).zfill(6)
+        otp_hash = hashlib.sha256(otp_str.encode("utf-8")).hexdigest()
+            
 
         # Validate OTP using constant-time comparison
         otp_hash = hashlib.sha256(str(otp).encode("utf-8")).hexdigest()
