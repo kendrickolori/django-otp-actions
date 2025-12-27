@@ -9,84 +9,75 @@ from .exceptions import (
     MaxRetriesExceededException,
 )
 
+# decorators.py
 
-def otp_protected():
+def otp_protected(func):
     """Injects generate_otp into the request object."""
-
-    def decorator(func):
-        @wraps(func)
-        def wrapper(request, *args, **kwargs):
-            request.generate_otp = generate_otp
-            return func(request, *args, **kwargs)
-
-        return wrapper
-
-    return decorator
+    @wraps(func)
+    def wrapper(request, *args, **kwargs):
+        request.generate_otp = generate_otp
+        return func(request, *args, **kwargs)
+    return wrapper
 
 
-def require_otp_verification():
+def otp_verified(func):
     """
     Validates OTP. 
     Returns Response with error and updated context on failure.
     Executes view on success.
     """
+    @wraps(func)
+    def wrapper(request, *args, **kwargs):
+        otp = str(request.data.get("otp") or "").strip()
+        encrypted_context = str(request.data.get("context") or "").strip()
 
-    def decorator(func):
-        @wraps(func)
-        def wrapper(request, *args, **kwargs):
-            otp = str(request.data.get("otp") or "").strip()
-            encrypted_context = str(request.data.get("context") or "").strip()
+        if not otp or not encrypted_context:
+            return Response(
+                {
+                    "error": "OTP and context are required",
+                    "error_code": "MISSING_FIELDS",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            if not otp or not encrypted_context:
-                return Response(
-                    {
-                        "error": "OTP and context are required",
-                        "error_code": "MISSING_FIELDS",
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        try:
+            # Success path
+            context = verify_otp(otp, encrypted_context)
+            request.otp_verified = True
+            request.otp_context = context
+            return func(request, *args, **kwargs)
 
-            try:
-                # Success path
-                context = verify_otp(otp, encrypted_context)
-                request.otp_verified = True
-                request.otp_context = context
-                return func(request, *args, **kwargs)
+        except InvalidOTPException as e:
+            return Response(
+                {
+                    "error": str(e),
+                    "error_code": "INVALID_OTP",
+                    "context": e.new_context, 
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            except InvalidOTPException as e:
-                # Retrieve the pre-calculated new context from the exception
-                return Response(
-                    {
-                        "error": str(e),
-                        "error_code": "INVALID_OTP",
-                        "context": e.new_context, 
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        except (OTPExpiredException, SessionExpiredException) as e:
+            code = (
+                "OTP_EXPIRED"
+                if isinstance(e, OTPExpiredException)
+                else "SESSION_EXPIRED"
+            )
+            return Response(
+                {"error": str(e), "error_code": code}, 
+                status=status.HTTP_410_GONE
+            )
 
-            except (OTPExpiredException, SessionExpiredException) as e:
-                code = (
-                    "OTP_EXPIRED"
-                    if isinstance(e, OTPExpiredException)
-                    else "SESSION_EXPIRED"
-                )
-                return Response(
-                    {"error": str(e), "error_code": code}, 
-                    status=status.HTTP_410_GONE
-                )
+        except MaxRetriesExceededException as e:
+            return Response(
+                {"error": str(e), "error_code": "MAX_RETRIES_EXCEEDED"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
 
-            except MaxRetriesExceededException as e:
-                return Response(
-                    {"error": str(e), "error_code": "MAX_RETRIES_EXCEEDED"},
-                    status=status.HTTP_429_TOO_MANY_REQUESTS,
-                )
+        except Exception:
+            return Response(
+                {"error": "Internal Error", "error_code": "OTP_ERROR"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            except Exception:
-                return Response(
-                    {"error": "Internal Error", "error_code": "OTP_ERROR"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        return wrapper
-
-    return decorator
+    return wrapper

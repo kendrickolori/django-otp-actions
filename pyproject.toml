@@ -5,9 +5,11 @@ description = "Django app for managing OTP integration"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
+
 authors = [
     { name = "Kendrick Olori", email = "kendrickolori2@gmail.com" },
 ]
+
 keywords = [
     "django",
     "otp",
@@ -15,8 +17,7 @@ keywords = [
     "authentication",
     "security",
 ]
-[tool.hatch.build.targets.wheel]
-      packages = ["src/otp_actions"]
+
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: Django",
@@ -30,164 +31,27 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
 ]
+
 dependencies = [
-    
-    # Updated to the standard package name
     "cryptography>=30.0",
-    "tzdata"
+    "tzdata",
 ]
 
-# Using triple quotes """ for the multi-line ReStructuredText string
-long_description = """
-```rst
-django-otp-actions
-==================
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-django",
+    "freezegun",
+]
 
-A secure, **stateless** One-Time Password (OTP) management library for Django and Django REST Framework.
-
-Overview
---------
-
-django-otp-actions provides a modern, high-performance approach to implementing one-time password authentication in Django applications, particularly API-driven ones built with Django REST Framework (DRF).
-
-Unlike conventional OTP libraries that rely on database tables or cache stores (e.g., Redis) to temporarily store generated codes, expiry timestamps, and retry counters, **django-otp-actions** adopts a fully **stateless** design. It leverages **Fernet symmetric encryption** from the trusted ``cryptography`` library to encrypt all necessary validation state — including the OTP hash, expiry times, and retry attempts — directly into a compact **context token** that is returned to the client.
-
-This encrypted context token is then sent back by the client during verification, allowing the server to decrypt and validate the submission without any server-side storage or database lookups. The result is zero database writes during the OTP lifecycle, reduced server load, horizontal scalability without shared cache dependencies, and a simplified architecture.
-
-Key Benefits
-------------
-
-- **Truly Stateless**: No temporary records in databases or caches. Perfect for serverless deployments, microservices, or high-traffic APIs.
-- **Enhanced Security**: Uses battle-tested Fernet (AES-128 in CBC mode with HMAC-SHA256) for encryption and secure SHA-256 hashing for OTP storage.
-- **Double-Window Protection**: Separates concerns with two independent time windows:
-  - **OTP Window** (default: 5 minutes): Validity period of the one-time code itself.
-  - **Session Window** (default: 15 minutes): Overall lifespan of the verification context to prevent prolonged exposure.
-- **Built-in Rate Limiting**: Retry attempts are tracked and enforced within the encrypted context token, thwarting brute-force attacks without external storage.
-- **Seamless DRF Integration**: Simple decorators (``@otp_protected`` and ``@require_otp_verification``) make securing API endpoints effortless.
-- **No External Dependencies Beyond Core**: Relies only on Django, DRF, and the standard ``cryptography`` library.
-
-Features
---------
-
-1. **Stateless Architecture** All OTP state is encrypted and embedded in the client-side context token. No database rows or cache entries are created or consulted.
-
-2. **Double-Window Security** - OTP Window: 5 minutes for the code itself.  
-   - Session Window: 15 minutes for the verification session.
-
-3. **Secure Cryptographic Primitives** Built on ``cryptography.fernet`` (AES-128) and SHA-256 hashing.
-
-4. **Django REST Framework Integration** Drop-in decorators to protect views and automatically handle generation/verification.
-
-5. **Automatic Rate Limiting** Configurable maximum retry attempts, enforced per context token.
-
-Requirements
-------------
-
-- Python 3.12 or higher
-- Django 6.0 or higher
-- Django REST Framework
-- cryptography >= 46.0.3
-
-Installation
-------------
-
-.. code-block:: bash
-
-    pip install django-otp-actions
-
-(Note: As of December 2025, the package is available on TestPyPI. Use ``pip install -i [https://test.pypi.org/simple/](https://test.pypi.org/simple/) django-otp-actions`` if installing from the test index.)
-
-Configuration
--------------
-
-Add the app to your ``INSTALLED_APPS`` and define a secure signing key:
-
-.. code-block:: python
-
-    INSTALLED_APPS = [
-        # ...
-        "rest_framework",
-        "django_otp_actions",
-    ]
-
-    # Generate a strong key (keep it secret!)
-    # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key())"
-    OTP_SIGNING_KEY = b'your-secure-base64-urlsafe-key-here=='
-
-Usage Example
--------------
-
-**Step 1: Generate OTP**
-
-.. code-block:: python
-
-    from rest_framework.decorators import api_view
-    from rest_framework.response import Response
-    from django_otp_actions.decorators import otp_protected
-	@otp_protected
-    @api_view(['POST'])
-    def request_otp(request):
-        identifier = request.data.get('email')  # or phone, user_id, etc.
-
-        otp_code, context_token = request.generate_otp(identifier=identifier)
-
-        # Send otp_code via your preferred channel (SMS, Email, etc.)
-        # ... your sending logic here ...
-
-        return Response({
-            "message": "OTP sent successfully",
-            "context": context_token
-        })
-
-**Step 2: Verify OTP**
-
-.. code-block:: python
-
-    from rest_framework.decorators import api_view
-    from rest_framework.response import Response
-    from django_otp_actions.decorators import require_otp_verification
-	@require_otp_verification
-    @api_view(['POST'])
-    def verify_otp(request):
-        # If execution reaches here, OTP is valid!
-        identifier = request.otp_context['identifier']
-
-        # Proceed with authentication, token issuance, etc.
-        return Response({
-            "status": "verified",
-            "identifier": identifier
-        })
-
-Client-Side Flow
-----------------
-
-1. Client POSTs identifier (e.g., email) to OTP request endpoint.
-2. Server generates OTP, sends it out-of-band, and returns encrypted ``context``.
-3. Client receives OTP via email/SMS.
-4. Client POSTs ``{"otp": "123456", "context": "encrypted-string"}`` to verification endpoint.
-5. Server validates and grants access.
-
-Roadmap
--------
-
-- Optional server-side invalidation layer: Hybrid mode with database backing for immediate revocation and replay attack prevention.
-- Configurable window durations and retry limits.
-- Additional utilities for common channels (e.g., email/SMS integrations).
-- Comprehensive test suite and documentation site.
-
-License
--------
-
-MIT License
-"""
-[project.optional-dependencies] 
-test = [ "pytest", "pytest-django", "freezegun", ]
-
-[project.urls] 
-Homepage = "https://github.com/kendrickolori/django-otp-actions" 
-Repository = "https://github.com/kendrickolori/django-otp-actions" 
+[project.urls]
+Homepage = "https://github.com/kendrickolori/django-otp-actions"
+Repository = "https://github.com/kendrickolori/django-otp-actions"
 Issues = "https://github.com/kendrickolori/django-otp-actions/issues"
 
-[build-system] 
-requires = ["hatchling"] 
+[tool.hatch.build.targets.wheel]
+packages = ["src/otp_actions"]
+
+[build-system]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
